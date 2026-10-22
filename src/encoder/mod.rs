@@ -2,7 +2,7 @@ mod asciicast;
 mod raw;
 mod txt;
 
-use std::io::Write;
+use std::io::{self, Write};
 
 use anyhow::Result;
 
@@ -12,7 +12,7 @@ pub use raw::RawEncoder;
 pub use txt::TextEncoder;
 
 pub trait Encoder {
-    fn header(&mut self, header: &Header) -> Vec<u8>;
+    fn header(&mut self, header: &Header) -> io::Result<Vec<u8>>;
     fn event(&mut self, event: Event) -> Vec<u8>;
     fn finish(&mut self) -> Vec<u8>;
 }
@@ -31,7 +31,7 @@ impl<E: Encoder + ?Sized> EncoderExt for E {
         cast: crate::asciicast::Asciicast,
         writer: &mut W,
     ) -> Result<()> {
-        writer.write_all(&self.header(&cast.header))?;
+        writer.write_all(&self.header(&cast.header)?)?;
 
         for event in cast.events {
             writer.write_all(&self.event(event?))?;

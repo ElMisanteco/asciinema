@@ -119,7 +119,7 @@ impl cli::Session {
         });
 
         if server.is_some() || forwarder.is_some() {
-            let output = stream.start(&metadata).await;
+            let output = stream.start(&metadata).await?;
             outputs.push(Box::new(output));
         }
 

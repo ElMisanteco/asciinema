@@ -2,7 +2,7 @@ use std::future;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use avt::Vt;
+use avt::Terminal;
 use futures_util::{stream, StreamExt};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::{io, time};
@@ -58,29 +58,34 @@ impl Stream {
         Subscriber(self.request_tx.clone())
     }
 
-    pub async fn start(self, metadata: &Metadata) -> LiveStream {
+    pub async fn start(self, metadata: &Metadata) -> anyhow::Result<LiveStream> {
+        let terminal = Terminal::with_scrollback(
+            metadata.term.size.0.into(),
+            metadata.term.size.1.into(),
+            Some(1000),
+        )?;
+
         let (stream_tx, stream_rx) = mpsc::channel(1024);
         let request_rx = self.request_rx;
 
         tokio::spawn(run(
-            metadata.term.size,
+            terminal,
             metadata.term.theme.clone(),
             stream_rx,
             request_rx,
         ));
 
-        LiveStream(stream_tx)
+        Ok(LiveStream(stream_tx))
     }
 }
 
 async fn run(
-    tty_size: TtySize,
+    mut terminal: Terminal,
     tty_theme: Option<TtyTheme>,
     mut stream_rx: mpsc::Receiver<session::Event>,
     mut request_rx: mpsc::Receiver<Request>,
 ) {
     let (broadcast_tx, _) = broadcast::channel(1024);
-    let mut vt = build_vt(tty_size);
     let mut stream_time = Duration::from_micros(0);
     let mut last_event_id = EventId::new(0);
     let mut last_event_time = Instant::now();
@@ -95,7 +100,7 @@ async fn run(
 
                         match event {
                             session::Event::Output(time, text) => {
-                                vt.feed_str(&text);
+                                terminal.feed(&text);
                                 let _ = broadcast_tx.send(Event::Output(last_event_id, time, text));
                                 stream_time = time;
                             }
@@ -106,7 +111,7 @@ async fn run(
                             }
 
                             session::Event::Resize(time, tty_size) => {
-                                vt.resize(tty_size.0.into(), tty_size.1.into());
+                                terminal.resize(tty_size.0.into(), tty_size.1.into());
                                 let _ = broadcast_tx.send(Event::Resize(last_event_id, time, tty_size));
                                 stream_time = time;
                             }
@@ -141,15 +146,15 @@ async fn run(
                             Event::Init(
                                 last_event_id,
                                 elapsed_time,
-                                vt.size().into(),
+                                terminal.size().into(),
                                 tty_theme.clone(),
-                                vt.dump(),
+                                terminal.dump(),
                             )
                         } else {
                             Event::Init(
                                 last_event_id,
                                 stream_time,
-                                vt.size().into(),
+                                terminal.size().into(),
                                 tty_theme.clone(),
                                 "".to_owned(),
                             )
@@ -208,13 +213,6 @@ impl Subscriber {
     }
 }
 
-fn build_vt(tty_size: TtySize) -> Vt {
-    Vt::builder()
-        .size(tty_size.0 as usize, tty_size.1 as usize)
-        .scrollback_limit(1000)
-        .build()
-}
-
 #[async_trait]
 impl session::Output for LiveStream {
     async fn event(&mut self, event: session::Event) -> io::Result<()> {
@@ -223,5 +221,111 @@ impl session::Output for LiveStream {
 
     async fn finish(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::time::SystemTime;
+
+    use super::*;
+    use crate::session::{Output, TermInfo};
+
+    #[test]
+    fn rejects_zero_initial_dimensions() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async {
+            for size in [TtySize(0, 3), TtySize(8, 0)] {
+                let error = Stream::new().start(&metadata(size)).await.err().unwrap();
+
+                assert_eq!(
+                    error.downcast_ref::<avt::InvalidSize>(),
+                    Some(&avt::InvalidSize {
+                        cols: size.0.into(),
+                        rows: size.1.into(),
+                    })
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn late_subscriber_receives_snapshot_and_subsequent_events() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        runtime.block_on(async {
+            time::timeout(Duration::from_secs(5), async {
+                let stream = Stream::new();
+                let subscriber = stream.subscriber();
+                let mut live = stream.start(&metadata(TtySize(8, 3))).await.unwrap();
+                let mut monitor = subscriber.subscribe().await.unwrap();
+                monitor.next().await.unwrap().unwrap();
+
+                let prefix = [
+                    session::Event::Output(Duration::from_secs(1), "hello".to_owned()),
+                    session::Event::Resize(Duration::from_secs(2), TtySize(12, 4)),
+                ];
+
+                for event in prefix {
+                    live.event(event).await.unwrap();
+
+                    // Receiving the broadcast ensures the update was applied before subscribing.
+                    monitor.next().await.unwrap().unwrap();
+                }
+
+                let mut events = subscriber.subscribe().await.unwrap();
+
+                let Event::Init(id, time, size, _, init) = events.next().await.unwrap().unwrap()
+                else {
+                    panic!("expected late-subscriber initialization");
+                };
+
+                assert_eq!(id.as_u64(), 2);
+                assert!(time >= Duration::from_secs(2));
+                assert_eq!(size, TtySize(12, 4));
+
+                let mut viewer = Terminal::new(size.0.into(), size.1.into()).unwrap();
+                viewer.feed(init);
+
+                assert_eq!(viewer.primary_screen().text(), ["hello", "", "", ""]);
+
+                live.event(session::Event::Output(
+                    Duration::from_secs(3),
+                    "!".to_owned(),
+                ))
+                .await
+                .unwrap();
+
+                let Event::Output(id, time, output) = events.next().await.unwrap().unwrap() else {
+                    panic!("expected streamed output");
+                };
+
+                assert_eq!(id.as_u64(), 3);
+                assert_eq!(time, Duration::from_secs(3));
+                assert_eq!(output, "!");
+                viewer.feed(output);
+                assert_eq!(viewer.primary_screen().text(), ["hello!", "", "", ""]);
+            })
+            .await
+            .expect("stream should deliver initialization and continuation");
+        });
+    }
+
+    fn metadata(size: TtySize) -> Metadata {
+        Metadata {
+            time: SystemTime::now(),
+            term: TermInfo {
+                type_: None,
+                version: None,
+                size,
+                theme: None,
+            },
+            idle_time_limit: None,
+            command: None,
+            title: None,
+            env: HashMap::new(),
+        }
     }
 }

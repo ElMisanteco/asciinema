@@ -1,3 +1,5 @@
+use std::io;
+
 use crate::asciicast::{Event, EventData, Header};
 
 pub struct RawEncoder;
@@ -9,8 +11,8 @@ impl RawEncoder {
 }
 
 impl super::Encoder for RawEncoder {
-    fn header(&mut self, header: &Header) -> Vec<u8> {
-        format!("\x1b[8;{};{}t", header.term_rows, header.term_cols).into_bytes()
+    fn header(&mut self, header: &Header) -> io::Result<Vec<u8>> {
+        Ok(format!("\x1b[8;{};{}t", header.term_rows, header.term_cols).into_bytes())
     }
 
     fn event(&mut self, event: Event) -> Vec<u8> {
@@ -44,7 +46,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(enc.header(&header), "\x1b[8;50;100t".as_bytes());
+        assert_eq!(enc.header(&header).unwrap(), "\x1b[8;50;100t".as_bytes());
 
         assert_eq!(
             enc.event(Event::output(

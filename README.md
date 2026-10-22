@@ -93,7 +93,7 @@ To download the source code, build the asciinema binary, and install it in
 cargo install --locked --git https://github.com/asciinema/asciinema
 ```
 
-This requires the Rust toolchain (1.82 or later) with Cargo, installed via your
+This requires the Rust toolchain (1.86 or later) with Cargo, installed via your
 system package manager or [rustup](https://rustup.rs/).
 
 Once installed, ensure `$HOME/.cargo/bin` is in your shell's `$PATH`.

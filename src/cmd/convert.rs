@@ -143,6 +143,36 @@ mod tests {
         assert_eq!(output, "hello\n");
     }
 
+    #[test]
+    fn reports_invalid_text_dimensions() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join("invalid.cast");
+        let output_path = dir.path().join("invalid.txt");
+
+        fs::write(
+            &input_path,
+            "{\"version\":3,\"term\":{\"cols\":0,\"rows\":3}}\n",
+        )
+        .unwrap();
+
+        let error = cli::Convert {
+            input: input_path.to_string_lossy().into_owned(),
+            output: output_path.to_string_lossy().into_owned(),
+            output_format: None,
+            overwrite: false,
+        }
+        .run()
+        .unwrap_err();
+
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+
+        assert!(error.to_string().contains("0x3"));
+        assert!(fs::read(output_path).unwrap().is_empty());
+    }
+
     fn convert(input: impl AsRef<Path>, output: impl AsRef<Path>) {
         cli::Convert {
             input: input.as_ref().to_string_lossy().into_owned(),

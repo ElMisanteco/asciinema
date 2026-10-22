@@ -136,8 +136,9 @@ fn run_worker(
     commands: mpsc::Receiver<Command>,
     started: oneshot::Sender<io::Result<()>>,
 ) {
-    let start_result = writer
-        .write_all(&encoder.header(&header))
+    let start_result = encoder
+        .header(&header)
+        .and_then(|header| writer.write_all(&header))
         .and_then(|()| writer.flush());
 
     if let Err(e) = start_result {
@@ -247,7 +248,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::encoder::{AsciicastV2Encoder, AsciicastV3Encoder, Encoder};
+    use crate::encoder::{AsciicastV2Encoder, AsciicastV3Encoder, Encoder, TextEncoder};
     use crate::notifier::NullNotifier;
     use crate::output_writer;
     use crate::session::{Output, TermInfo};
@@ -299,6 +300,44 @@ mod tests {
             cast.events.last().unwrap().unwrap().time,
             Duration::from_secs(3)
         );
+    }
+
+    #[test]
+    fn writes_text_and_finishes_the_transcript() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("recording.txt");
+        let file = fs::File::create(&path).unwrap();
+
+        write_with_encoder(
+            file,
+            false,
+            Box::new(TextEncoder::new()),
+            "before\r\n\x1b[H\x1b[2Jafter",
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "before\nafter\n");
+    }
+
+    #[test]
+    fn propagates_text_initialization_errors_from_the_worker() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invalid.txt");
+        let file = fs::File::create(&path).unwrap();
+
+        let file_output = FileOutput::new(
+            Box::new(file),
+            Box::new(TextEncoder::new()),
+            Box::new(NullNotifier),
+            metadata(TtySize(0, 3)),
+        );
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime.block_on(file_output.start()).err().unwrap();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("0x3"));
+        assert!(fs::read(path).unwrap().is_empty());
     }
 
     fn write_recording(
@@ -353,20 +392,14 @@ mod tests {
         time: Duration,
     ) {
         let writer = output_writer::new(file, compressed).unwrap();
-        let metadata = Metadata {
-            time: SystemTime::now(),
-            term: TermInfo {
-                type_: None,
-                version: None,
-                size: TtySize(80, 24),
-                theme: None,
-            },
-            idle_time_limit: None,
-            command: None,
-            title: None,
-            env: HashMap::new(),
-        };
-        let file_output = FileOutput::new(writer, encoder, Box::new(NullNotifier), metadata);
+
+        let file_output = FileOutput::new(
+            writer,
+            encoder,
+            Box::new(NullNotifier),
+            metadata(TtySize(80, 24)),
+        );
+
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async {
@@ -377,5 +410,21 @@ mod tests {
                 .unwrap();
             output.finish().await.unwrap();
         });
+    }
+
+    fn metadata(size: TtySize) -> Metadata {
+        Metadata {
+            time: SystemTime::now(),
+            term: TermInfo {
+                type_: None,
+                version: None,
+                size,
+                theme: None,
+            },
+            idle_time_limit: None,
+            command: None,
+            title: None,
+            env: HashMap::new(),
+        }
     }
 }
